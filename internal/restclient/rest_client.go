@@ -2,6 +2,7 @@ package restclient
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -147,6 +148,41 @@ func (r *RestClient) GetZeroOrMoreRecords(baseURL string, query *RestQuery, body
 		return statusCode, nil, err
 	}
 	return statusCode, response.Records, err
+}
+
+// GetResponse performs a raw GET request against an ONTAP REST API endpoint that returns
+// a single JSON object (not wrapped in "records"). It handles query parameters and
+// returns the HTTP status code and the decoded JSON body as a map[string]interface{}.
+func (r *RestClient) GetResponse(baseURL string, query *RestQuery, body map[string]interface{}) (int, map[string]interface{}, error) {
+	// Construct the full URL including query parameters
+	values := url.Values{}
+	if query != nil {
+		values = query.Values
+	}
+
+	// Perform the HTTP GET request
+	statusCode, rawResponse, err := r.httpClient.Do(baseURL, &httpclient.Request{
+		Method: "GET",
+		Body:   body,
+		Query:  values,
+	})
+	if err != nil {
+		return statusCode, nil, fmt.Errorf("HTTP GET request failed: %w", err)
+	}
+
+	// Handle empty responses
+	if len(rawResponse) == 0 {
+		return statusCode, nil, fmt.Errorf("empty response from %s", baseURL)
+	}
+
+	// Unmarshal the JSON into a map[string]interface{}
+	var responseMap map[string]interface{}
+	if err := json.Unmarshal(rawResponse, &responseMap); err != nil {
+		return statusCode, nil, fmt.Errorf("failed to unmarshal response from %s: %w", baseURL, err)
+	}
+
+	tflog.Debug(r.ctx, fmt.Sprintf("GET %s -> status=%d, response=%#v", baseURL, statusCode, responseMap))
+	return statusCode, responseMap, nil
 }
 
 // callAPIMethod can be used to make a request to any REST API method, receiving response as bytes

@@ -2,6 +2,7 @@ package interfaces
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/hashicorp/terraform-plugin-log/tflog"
 	"github.com/mitchellh/mapstructure"
@@ -79,58 +80,160 @@ type StorageFlexcacheDataSourceFilterModel struct {
 
 // GetStorageFlexcacheByName to get flexcache info by name.
 func GetStorageFlexcacheByName(errorHandler *utils.ErrorHandler, r restclient.RestClient, name string, svmName string) (*StorageFlexcacheGetDataModelONTAP, error) {
+	// API responses are unreliable when trying to fetch by filter
+	// Find the ID first and then get the extra fields
 	query := r.NewQuery()
 	query.Add("name", name)
 	query.Add("svm.name", svmName)
-	query.Fields([]string{"size", "path", "origins", "guarantee.type", "constituents_per_aggregate", "dr_cache", "global_file_locking_enabled", "aggregates"})
 	statusCode, response, err := r.GetNilOrOneRecord("storage/flexcache/flexcaches", query, nil)
 	if err != nil {
 		return nil, errorHandler.MakeAndReportError("error reading flexcache info", fmt.Sprintf("error on GET storage/flexcache/flexcaches: %s", err))
 	}
-	var dataONTAP *StorageFlexcacheGetDataModelONTAP
-	if err := mapstructure.Decode(response, &dataONTAP); err != nil {
-		return nil, errorHandler.MakeAndReportError("error decoding flexcache info", fmt.Sprintf("error on decode storage/flexcache/flexcaches: %s, statusCode %d, response %#v", err, statusCode, response))
+	if response == nil {
+		// No record found
+		tflog.Debug(errorHandler.Ctx, fmt.Sprintf("No flexcache found for %s/%s", name, svmName))
+		return nil, nil
 	}
-	tflog.Debug(errorHandler.Ctx, fmt.Sprintf("Read flexcache source - udata: %#v", dataONTAP))
-	return dataONTAP, nil
+
+	// Extract href from the response
+	var basic struct {
+		Links struct {
+			Self struct {
+				Href string `mapstructure:"href"`
+			} `mapstructure:"self"`
+		} `mapstructure:"_links"`
+	}
+	if err := mapstructure.Decode(response, &basic); err != nil {
+		return nil, errorHandler.MakeAndReportError("error decoding basic flexcache response", fmt.Sprintf("decode error: %v, statusCode %d, response %#v", err, statusCode, response))
+	}
+	href := strings.TrimPrefix(basic.Links.Self.Href, "/api/")
+	if href == "" {
+		return nil, errorHandler.MakeAndReportError("error reading flexcache info", fmt.Sprintf("missing href in basic flexcache response: %#v", response))
+	}
+	// Query the specific flexcache with the extra fields
+	detailQuery := r.NewQuery()
+	detailQuery.Fields([]string{"size", "path", "origins", "guarantee.type", "constituents_per_aggregate", "dr_cache", "global_file_locking_enabled", "aggregates"})
+
+	statusCode, detailResponse, err := r.GetResponse(href, detailQuery, nil)
+	if err != nil {
+		return nil, errorHandler.MakeAndReportError(
+			"error reading detailed flexcache info",
+			fmt.Sprintf("GET %s failed: %v", href, err),
+		)
+	}
+
+	var dataONTAP StorageFlexcacheGetDataModelONTAP
+	if err := mapstructure.Decode(detailResponse, &dataONTAP); err != nil {
+		return nil, errorHandler.MakeAndReportError("error decoding detailed flexcache info", fmt.Sprintf("decode error: %v, statusCode %d, response %#v", err, statusCode, detailResponse))
+	}
+
+	tflog.Debug(errorHandler.Ctx, fmt.Sprintf("Read flexcache source (detailed): %#v", dataONTAP))
+	return &dataONTAP, nil
 }
 
-// GetStorageFlexcaches to get flexcaches info by filter
+// GetStorageFlexcaches retrieves all FlexCache volumes that match the filter.
+// It performs a lightweight list query first, then fetches full details per record
+// to avoid ONTAP API issues with large field lists.
 func GetStorageFlexcaches(errorHandler *utils.ErrorHandler, r restclient.RestClient, filter *StorageFlexcacheDataSourceFilterModel) ([]StorageFlexcacheGetDataModelONTAP, error) {
 	api := "storage/flexcache/flexcaches"
+	// Step 1: initial lightweight query (minimal fields)
 	query := r.NewQuery()
-	query.Fields([]string{"size", "path", "origins", "guarantee.type", "constituents_per_aggregate", "dr_cache", "global_file_locking_enabled", "aggregates"})
+	query.Fields([]string{"uuid", "name", "svm.name"})
+
 	if filter != nil {
 		var filterMap map[string]interface{}
 		if err := mapstructure.Decode(filter, &filterMap); err != nil {
-			return nil, errorHandler.MakeAndReportError("error encoding storage flexcache filter info", fmt.Sprintf("error on filter %#v: %s", filter, err))
+			return nil, errorHandler.MakeAndReportError(
+				"error encoding storage flexcache filter info",
+				fmt.Sprintf("error on filter %#v: %s", filter, err),
+			)
 		}
 		query.SetValues(filterMap)
 	}
 
+	// Fetch basic list of flexcache records
 	statusCode, response, err := r.GetZeroOrMoreRecords(api, query, nil)
-	if err == nil && response == nil {
-		err = fmt.Errorf("no response for GET %s", api)
-	}
 	if err != nil {
-		return nil, errorHandler.MakeAndReportError("error reading storage flexcache info", fmt.Sprintf("error on GET %s: %s, statusCode %d", api, err, statusCode))
+		return nil, errorHandler.MakeAndReportError(
+			"error reading storage flexcache list",
+			fmt.Sprintf("GET %s failed: %s, statusCode %d", api, err, statusCode),
+		)
 	}
 
-	var dataONTAP []StorageFlexcacheGetDataModelONTAP
-	for _, info := range response {
-		var record StorageFlexcacheGetDataModelONTAP
-		if err := mapstructure.Decode(info, &record); err != nil {
-			return nil, errorHandler.MakeAndReportError(fmt.Sprintf("failed to decode response from GET %s", api),
-				fmt.Sprintf("error: %s, statusCode %d, info %#v", err, statusCode, info))
-		}
-		dataONTAP = append(dataONTAP, record)
+	if response == nil || len(response) == 0 {
+		tflog.Debug(errorHandler.Ctx, fmt.Sprintf("No flexcache records found for %s", api))
+		return []StorageFlexcacheGetDataModelONTAP{}, nil
 	}
-	tflog.Debug(errorHandler.Ctx, fmt.Sprintf("Read storage flexcache data source: %#v", dataONTAP))
-	return dataONTAP, nil
+
+	// Step 2: iterate over each record and fetch full details
+	var results []StorageFlexcacheGetDataModelONTAP
+
+	for _, record := range response {
+		var basic struct {
+			Links struct {
+				Self struct {
+					Href string `mapstructure:"href"`
+				} `mapstructure:"self"`
+			} `mapstructure:"_links"`
+		}
+
+		if err := mapstructure.Decode(record, &basic); err != nil {
+			errorHandler.MakeAndReportError(
+				"error decoding flexcache href info",
+				fmt.Sprintf("decode error: %v, record: %#v", err, record),
+			)
+			continue
+		}
+
+		href := strings.TrimPrefix(basic.Links.Self.Href, "/api/")
+		if href == "" {
+			errorHandler.MakeAndReportError(
+				"missing href in flexcache record",
+				fmt.Sprintf("record: %#v", record),
+			)
+			continue
+		}
+
+		// Query with detailed fields for each record
+		detailQuery := r.NewQuery()
+		detailQuery.Fields([]string{
+			"size",
+			"path",
+			"origins",
+			"guarantee.type",
+			"constituents_per_aggregate",
+			"dr_cache",
+			"global_file_locking_enabled",
+			"aggregates",
+		})
+
+		statusCode, detailResponse, err := r.GetResponse(href, detailQuery, nil)
+		if err != nil {
+			errorHandler.MakeAndReportError(
+				"error fetching detailed flexcache info",
+				fmt.Sprintf("GET %s failed: %v", href, err),
+			)
+			continue
+		}
+
+		var detailedRecord StorageFlexcacheGetDataModelONTAP
+		if err := mapstructure.Decode(detailResponse, &detailedRecord); err != nil {
+			errorHandler.MakeAndReportError(
+				"error decoding detailed flexcache info",
+				fmt.Sprintf("decode error: %v, statusCode %d, response %#v", err, statusCode, detailResponse),
+			)
+			continue
+		}
+
+		results = append(results, detailedRecord)
+	}
+
+	tflog.Debug(errorHandler.Ctx, fmt.Sprintf("Fetched %d flexcaches: %#v", len(results), results))
+	return results, nil
 }
 
 // CreateStorageFlexcache creates flexcache.
-// POST API returns result, but does not include the attributes that are not set. Make a spearate GET call to get all attributes.
+// POST API returns result, but does not include the attributes that are not set. Make a speparate GET call to get all attributes.
 func CreateStorageFlexcache(errorHandler *utils.ErrorHandler, r restclient.RestClient, data StorageFlexcacheResourceModel) error {
 	var body map[string]interface{}
 	if err := mapstructure.Decode(data, &body); err != nil {
