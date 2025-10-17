@@ -187,10 +187,6 @@ func (r *StorageFlexcachesDataSource) Schema(ctx context.Context, req datasource
 							MarkdownDescription: "The state of the global file locking",
 							Computed:            true,
 						},
-						"use_tiered_aggregate": schema.BoolAttribute{
-							MarkdownDescription: "The state of the use tiered aggregates",
-							Computed:            true,
-						},
 						"id": schema.StringAttribute{
 							MarkdownDescription: "The UUID of the flexcache volume",
 							Computed:            true,
