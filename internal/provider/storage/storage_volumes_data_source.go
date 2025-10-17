@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/datasource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -48,8 +49,9 @@ type StorageVolumesDataSourceModel struct {
 
 // StorageVolumeDataSourceFilterModel describes the data source data model for queries.
 type StorageVolumeDataSourceFilterModel struct {
-	Name    types.String `tfsdk:"name"`
-	SVMName types.String `tfsdk:"svm_name"`
+	Name              types.String `tfsdk:"name"`
+	SVMName           types.String `tfsdk:"svm_name"`
+	TieringObjectTags types.String `tfsdk:"tiering_object_tags"`
 }
 
 // Metadata returns the data source type name.
@@ -76,6 +78,10 @@ func (d *StorageVolumesDataSource) Schema(ctx context.Context, req datasource.Sc
 					},
 					"svm_name": schema.StringAttribute{
 						MarkdownDescription: "StorageVolume svm name",
+						Optional:            true,
+					},
+					"tiering_object_tags": schema.StringAttribute{
+						MarkdownDescription: "StorageVolume tiering object tag value",
 						Optional:            true,
 					},
 				},
@@ -211,6 +217,11 @@ func (d *StorageVolumesDataSource) Schema(ctx context.Context, req datasource.Sc
 									MarkdownDescription: "Determines how many days must pass before inactive data in a volume using the Auto or Snapshot-Only policy is considered cold and eligible for tiering",
 									Computed:            true,
 								},
+								"object_tags": schema.ListAttribute{
+									ElementType:         types.StringType,
+									MarkdownDescription: "Object tags are applied to objects in tiered storage",
+									Computed:            true,
+								},
 							},
 						},
 						"efficiency": schema.SingleNestedAttribute{
@@ -320,6 +331,14 @@ func (d *StorageVolumesDataSource) Configure(ctx context.Context, req datasource
 	d.config.ProviderConfig = config
 }
 
+func stringSliceToList(strings []string) types.List {
+	vals := make([]attr.Value, len(strings))
+	for i, s := range strings {
+		vals[i] = types.StringValue(s)
+	}
+	return types.ListValueMust(types.StringType, vals)
+}
+
 // Read refreshes the Terraform state with the latest data.
 func (d *StorageVolumesDataSource) Read(ctx context.Context, req datasource.ReadRequest, resp *datasource.ReadResponse) {
 	var data StorageVolumesDataSourceModel
@@ -342,8 +361,9 @@ func (d *StorageVolumesDataSource) Read(ctx context.Context, req datasource.Read
 	var filter *interfaces.StorageVolumeDataSourceFilterModel = nil
 	if data.Filter != nil {
 		filter = &interfaces.StorageVolumeDataSourceFilterModel{
-			Name:    data.Filter.Name.ValueString(),
-			SVMName: data.Filter.SVMName.ValueString(),
+			Name:              data.Filter.Name.ValueString(),
+			SVMName:           data.Filter.SVMName.ValueString(),
+			TieringObjectTags: data.Filter.TieringObjectTags.ValueString(),
 		}
 	}
 	restInfo, err := interfaces.GetStorageVolumes(errorHandler, *client, filter)
@@ -395,6 +415,7 @@ func (d *StorageVolumesDataSource) Read(ctx context.Context, req datasource.Read
 			Tiering: &StorageVolumeDataSourceTiering{
 				Policy:             types.StringValue(record.TieringPolicy.Policy),
 				MinimumCoolingDays: types.Int64Value(int64(record.TieringPolicy.MinCoolingDays)),
+				ObjectTags:         stringSliceToList(record.TieringPolicy.ObjectTags),
 			},
 			Efficiency: &StorageVolumeDataSourceEfficiency{
 				Policy:      types.StringValue(record.Efficiency.Policy.Name),
