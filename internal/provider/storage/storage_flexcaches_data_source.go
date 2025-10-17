@@ -264,7 +264,6 @@ func (r *StorageFlexcachesDataSource) Read(ctx context.Context, req datasource.R
 		data.StorageFlexcaches[index].ConstituentsPerAggregate = types.Int64Value(int64(record.ConstituentsPerAggregate))
 		data.StorageFlexcaches[index].DrCache = types.BoolValue(record.DrCache)
 		data.StorageFlexcaches[index].GlobalFileLockingEnabled = types.BoolValue(record.GlobalFileLockingEnabled)
-		data.StorageFlexcaches[index].UseTieredAggregate = types.BoolValue(record.UseTieredAggregate)
 		data.StorageFlexcaches[index].ID = types.StringValue(record.UUID)
 
 		//guarantee
